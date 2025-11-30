@@ -1,128 +1,180 @@
-# import the necessary packages
+# streamlit_app.py
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import timeit
+import seaborn as sns
+import time
 import warnings
 
 warnings.filterwarnings("ignore")
+
 import streamlit as st
 
-st.title('Credit Card Fraud Detection!')
-
-# Load the dataset from the csv file using pandas
-df = st.cache(pd.read_csv)('credit card fraud.csv')
-df = df.sample(frac=0.1, random_state=48)
-
-# Print shape and description of the data
-if st.sidebar.checkbox('Show what the dataframe looks like'):
-    st.write(df.head(100))
-    st.write('Shape of the dataframe: ', df.shape)
-    st.write('Data decription: \n', df.describe())
-# Print valid and fraud transactions
-fraud = df[df.Class == 1]
-valid = df[df.Class == 0]
-outlier_percentage = (df.Class.value_counts()[1] / df.Class.value_counts()[0]) * 100
-if st.sidebar.checkbox('Show fraud and valid transaction details'):
-    st.write('Fraudulent transactions are: %.3f%%' % outlier_percentage)
-    st.write('Fraud Cases: ', len(fraud))
-    st.write('Valid Cases: ', len(valid))
-
-    # Obtaining X (features) and y (labels)
-X = df.drop(['Class'], axis=1)
-y = df.Class
-# Split the data into training and testing sets
-from sklearn.model_selection import train_test_split
-
-size = st.sidebar.slider('Test Set Size', min_value=0.2, max_value=0.4)
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=size, random_state=42)
-# Print shape of train and test sets
-if st.sidebar.checkbox('Show the shape of training and test set features and labels'):
-    st.write('X_train: ', X_train.shape)
-    st.write('y_train: ', y_train.shape)
-    st.write('X_test: ', X_test.shape)
-    st.write('y_test: ', y_test.shape)
-
-    # Import classification models and metrics
+# ML imports
+from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.linear_model import LogisticRegression
 from sklearn.neighbors import KNeighborsClassifier
-from sklearn.svm import SVC
 from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier
-from sklearn.model_selection import cross_val_score
-
-logreg = LogisticRegression()
-svm = SVC()
-knn = KNeighborsClassifier()
-etree = ExtraTreesClassifier(random_state=42)
-rforest = RandomForestClassifier(random_state=42)
-
-
-# Feature selection through feature importance
-@st.cache
-def feature_sort(model, X_train, y_train):
-    # feature selection
-    mod = model
-    # fit the model
-    mod.fit(X_train, y_train)
-    # get importance
-    imp = mod.feature_importances_
-    return imp
-
-
-# Classifiers for feature importance
-# clf=['Decision Trees','Random Forest']
-# mod_feature = st.sidebar.selectbox('Which model to use?', clf)
-# start_time = timeit.default_timer()
-# if mod_feature=='Decision Trees':
-#     model=etree
-#     importance=feature_sort(model,X_train,y_train)
-# elif mod_feature=='Random Forest':
-#     model=rforest
-#     importance=feature_sort(model,X_train,y_train)
-# elapsed = timeit.default_timer() - start_time
-# st.write('Execution Time for feature selection: %.2f minutes'%(elapsed/60))
-# #Plot of feature importance
-# if st.sidebar.checkbox('Show plot of feature importance'):
-#     plt.bar([x for x in range(len(importance))], importance)
-#     plt.title('Feature Importance')
-#     plt.xlabel('Feature (Variable Number)')
-#     plt.ylabel('Importance')
-#     st.pyplot()
-
-# Import performance metrics, imbalanced rectifiers
-from sklearn.metrics import confusion_matrix, classification_report, matthews_corrcoef
+from sklearn.metrics import confusion_matrix, classification_report, accuracy_score
 from imblearn.over_sampling import SMOTE
 from imblearn.under_sampling import NearMiss
 
-np.random.seed(42)  # for reproducibility since SMOTE and Near Miss use randomizations
-smt = SMOTE()
-nr = NearMiss()
+st.set_page_config(page_title="Credit Card Fraud Detection", layout="wide")
+st.title("💳 Credit Card Fraud Detection")
 
+# ------- Load data (cached) -------
+@st.cache_data
+def load_data(path):
+    df = pd.read_csv(path)
+    return df
 
-def compute_performance(model, X_train, y_train, X_test, y_test):
-    start_time = timeit.default_timer()
-    scores = cross_val_score(model, X_train, y_train, cv=3, scoring='accuracy').mean()
-    'Accuracy: ', scores
+data_path = st.sidebar.text_input("CSV file path", "credit card fraud.csv")
+if not data_path:
+    st.sidebar.error("Please provide the CSV file path (eg. credit card fraud.csv)")
+    st.stop()
+
+try:
+    df = load_data(data_path)
+except Exception as e:
+    st.sidebar.error(f"Error loading file: {e}")
+    st.stop()
+
+# sample option
+sample_frac = st.sidebar.slider("Sample fraction (for faster runs)", 0.05, 1.0, 0.1, 0.05)
+
+if sample_frac < 1.0:
+    df = df.sample(frac=sample_frac, random_state=48)
+
+# ------- Sidebar: show data/info -------
+st.sidebar.subheader("Data preview")
+if st.sidebar.checkbox("Show dataframe (first 100 rows)"):
+    st.write(df.head(100))
+    st.write("Shape:", df.shape)
+    st.write(df.describe())
+
+# show fraud / valid counts
+if "Class" not in df.columns:
+    st.error("Dataset must contain 'Class' column (0 = valid, 1 = fraud).")
+    st.stop()
+
+fraud = df[df.Class == 1]
+valid = df[df.Class == 0]
+outlier_percentage = (len(fraud) / len(valid)) * 100 if len(valid) > 0 else 0
+
+st.sidebar.markdown(f"**Fraudulent transactions:** {len(fraud)}")
+st.sidebar.markdown(f"**Valid transactions:** {len(valid)}")
+st.sidebar.markdown(f"**Outlier %:** {outlier_percentage:.3f}%")
+
+# ------- Prepare features and labels -------
+X = df.drop(columns=["Class"])
+y = df["Class"]
+
+# allow user to pick features (or use all)
+st.sidebar.subheader("Features")
+use_all = st.sidebar.checkbox("Use all features (recommended)", value=True)
+if not use_all:
+    cols = st.sidebar.multiselect("Select features to use", list(X.columns), default=list(X.columns)[:10])
+    if not cols:
+        st.sidebar.error("Select at least one feature")
+        st.stop()
+    X = X[cols]
+
+# split
+test_size = st.sidebar.slider("Test set size", 0.2, 0.4, 0.25, 0.05)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42, stratify=y)
+
+if st.sidebar.checkbox("Show train/test shapes"):
+    st.write("X_train:", X_train.shape, "y_train:", y_train.shape)
+    st.write("X_test:", X_test.shape, "y_test:", y_test.shape)
+
+# ------- Model & imbalance options -------
+st.sidebar.subheader("Model & Imbalance handling")
+model_name = st.sidebar.selectbox("Choose classifier",
+                                  ["Logistic Regression", "KNN", "Random Forest", "Extra Trees"])
+imbalance = st.sidebar.selectbox("Imbalance handling", ["None", "SMOTE (oversample)", "NearMiss (undersample)"])
+
+# classifier mapping
+def get_model(name):
+    if name == "Logistic Regression":
+        return LogisticRegression(max_iter=1000)
+    elif name == "KNN":
+        return KNeighborsClassifier()
+    elif name == "Random Forest":
+        return RandomForestClassifier(random_state=42, n_estimators=100)
+    elif name == "Extra Trees":
+        return ExtraTreesClassifier(random_state=42, n_estimators=100)
+    else:
+        return LogisticRegression(max_iter=1000)
+
+model = get_model(model_name)
+
+# feature importance helper
+def get_feature_importances(model, X_train, y_train):
+    has_attr = hasattr(model, "feature_importances_")
+    if not has_attr:
+        return None
     model.fit(X_train, y_train)
+    return pd.Series(model.feature_importances_, index=X_train.columns).sort_values(ascending=False)
+
+# ------- Performance computation -------
+def run_training(model, X_train, y_train, X_test, y_test, imbalance):
+    start = time.time()
+    X_tr, y_tr = X_train.copy(), y_train.copy()
+
+    if imbalance == "SMOTE (oversample)":
+        sm = SMOTE(random_state=42)
+        X_tr, y_tr = sm.fit_resample(X_tr, y_tr)
+    elif imbalance == "NearMiss (undersample)":
+        nm = NearMiss()
+        X_tr, y_tr = nm.fit_resample(X_tr, y_tr)
+
+    # cross-val score (accuracy)
+    try:
+        cv_score = cross_val_score(model, X_tr, y_tr, cv=3, scoring="accuracy").mean()
+    except Exception:
+        cv_score = None
+
+    model.fit(X_tr, y_tr)
     y_pred = model.predict(X_test)
+    acc = accuracy_score(y_test, y_pred)
     cm = confusion_matrix(y_test, y_pred)
-    'Confusion Matrix: ', cm
-    # cr=classification_report(y_test, y_pred)
-    # 'Classification Report: ',cr
-    # mcc= matthews_corrcoef(y_test, y_pred)
-    # 'Matthews Correlation Coefficient: ',mcc
-    elapsed = timeit.default_timer() - start_time
-    'Execution Time for performance computation: %.2f minutes' % (elapsed / 60)
+    cr = classification_report(y_test, y_pred, output_dict=True)
+    elapsed = time.time() - start
+    return {"model": model, "cv_score": cv_score, "accuracy": acc, "confusion_matrix": cm, "class_report": cr, "time": elapsed}
 
+# ------- UI: Run button -------
+st.subheader("Run Model")
+if st.button("Run training & evaluate"):
+    with st.spinner("Training and evaluating..."):
+        result = run_training(model, X_train, y_train, X_test, y_test, imbalance)
 
-# Run different classification models with rectifiers
-if st.sidebar.checkbox('Run a credit card fraud detection model'):
+    st.success(f"Done — time: {result['time']:.2f}s")
+    if result["cv_score"] is not None:
+        st.write(f"Cross-val accuracy (3-fold): **{result['cv_score']:.4f}**")
+    st.write(f"Test accuracy: **{result['accuracy']:.4f}**")
 
-    alg = ['Decision Trees']
-    classifier = st.sidebar.selectbox('Which algorithm?', alg)
-    # rectifier=['SMOTE','Near Miss','No Rectifier']
-    # imb_rect = st.sidebar.selectbox('Which imbalanced class rectifier?', rectifier)
+    # confusion matrix plot
+    cm = result["confusion_matrix"]
+    fig, ax = plt.subplots(figsize=(5,4))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax)
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("Actual")
+    ax.set_title("Confusion Matrix")
+    st.pyplot(fig)
 
-    if classifier == 'Decision Trees':
-        model = etree
-        compute_performance(model, X_train, y_train, X_test, y_test)
+    # classification report table
+    st.write("### Classification Report")
+    cr_df = pd.DataFrame(result["class_report"]).transpose()
+    st.dataframe(cr_df)
+
+    # feature importance if available
+    fi = get_feature_importances(get_model(model_name), X_train, y_train)
+    if fi is not None:
+        st.write("### Feature Importances")
+        st.bar_chart(fi.head(20))
+    else:
+        st.info("Selected model does not provide feature importances. Try Random Forest or Extra Trees to view importances.")
+
+    st.balloons()
+else:
+    st.info("Configure options from the sidebar and click 'Run training & evaluate' to execute models.")
